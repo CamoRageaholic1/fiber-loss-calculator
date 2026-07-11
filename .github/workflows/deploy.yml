@@ -61,4 +61,4 @@ jobs:
           command: pages deploy dist --project-name=fiber-loss-calculator --branch=main --commit-hash=${{ github.sha }}
 
       - name: Smoke test deployed release
-        run: curl --fail --silent --show-error --retry 5 --retry-delay 3 "${{ steps.deploy.outputs.deployment-url }}" > /dev/null
+        run: curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy.outputs.deployment-url }}" > /dev/null

@@ -1,85 +1,241 @@
-import { FIBER_TYPES, SOURCES, STANDARD_PROFILES } from "./config.js";
+import { APP_VERSION, FIBER_TYPES, SOURCES, STANDARD_PROFILES } from "./config.js";
 import { fromKilometers } from "./calculator.js";
 import { formatNumber } from "./format.js";
 
 const encoder = new TextEncoder();
 
 export function buildReport(link, generatedAt = new Date()) {
-  const { scenario, selected, typical, tia } = link;
+  const { scenario } = link;
   const enteredLength = fromKilometers(scenario.lengthKm, scenario.unit);
   const unitLabel = scenario.unit === "ft" ? "ft" : "km";
+  const outputs = link.outputs.map((output) => reportOutput(output));
+  const diagnosticOutput =
+    link.outputs.find((output) => output.id === link.diagnosticOutputId) ?? link.outputs[0];
   const rows = [
-    row("Fiber", `${FIBER_TYPES[scenario.fiberType]?.label ?? scenario.fiberType} at ${scenario.wavelengthNm} nm`, scenario.lengthKm, "km", selected.attenuationDbPerKm, selected.fiberDb),
-    row("Connections", "Mated connector pairs", scenario.connections, "pairs", scenario.connectionDb, selected.connectionDb),
-    row("Splices", "Fusion splices", scenario.fusionSplices, "events", scenario.fusionSpliceDb, selected.fusionSpliceDb),
-    row("Splices", "Mechanical splices", scenario.mechanicalSplices, "events", scenario.mechanicalSpliceDb, selected.mechanicalSpliceDb),
-    ...selected.splitterRows.map((item) =>
+    row("Connections", "Mated connector pairs", scenario.connections, "pairs", scenario.connectionDb, link.selected.connectionDb),
+    row("Splices", "Fusion splices", scenario.fusionSplices, "events", scenario.fusionSpliceDb, link.selected.fusionSpliceDb),
+    row("Splices", "Mechanical splices", scenario.mechanicalSplices, "events", scenario.mechanicalSpliceDb, link.selected.mechanicalSpliceDb),
+    ...link.selected.splitterRows.map((item) =>
       row("Splitters", `${item.ratio} splitter on selected path`, item.quantity, "stages", item.lossDb, item.subtotalDb),
     ),
-    ...selected.extraRows.map((item) =>
+    ...link.selected.extraRows.map((item) =>
       row("Other", item.label || "Custom passive component", item.quantity, "items", item.lossDb, item.subtotalDb),
     ),
   ];
 
   return {
-    title: "Fiber Ledger — Optical Link Budget Report",
+    title: `Fiber Ledger v${APP_VERSION} — Optical Link Budget Report`,
+    version: APP_VERSION,
+    author: "David Osisek",
     generated: generatedAt.toISOString(),
     scenarioName: scenario.name,
     inputs: [
       ["Entered length", `${format(enteredLength, scenario.unit === "ft" ? 1 : 4)} ${unitLabel}`],
       ["Normalized length", `${format(scenario.lengthKm, 6)} km`],
       ["Fiber", FIBER_TYPES[scenario.fiberType]?.label ?? scenario.fiberType],
-      ["Wavelength", `${scenario.wavelengthNm} nm`],
       ["Profile", STANDARD_PROFILES[scenario.profile]?.label ?? scenario.profile],
-      ["Attenuation", `${format(scenario.attenuationDbPerKm, 3)} dB/km`],
-      ["OLTS reference", link.reference.label],
-      ["Tx minimum", `${format(scenario.txPowerDbm, 3)} dBm`],
-      ["Tx maximum", `${format(scenario.txMaxDbm, 3)} dBm`],
-      ["Rx sensitivity", `${format(scenario.rxSensitivityDbm, 3)} dBm`],
-      ["Rx overload", `${format(scenario.rxOverloadDbm, 3)} dBm`],
       ["Engineering margin", `${format(scenario.engineeringMarginDb, 3)} dB`],
-      ["Overload loss basis", link.overloadDefinitive ? `${format(link.overloadBasisDb, 3)} dB minimum path loss` : `${format(link.overloadBasisDb, 3)} dB selected loss · advisory only`],
+      ["Optical outputs", String(outputs.length)],
     ],
     rows,
-    totals: [
-      ["Passive plant loss · selected design", selected.totalDb, "dB"],
-      ["FOA typical estimate", typical.totalDb, "dB"],
-      ["TIA component allowances + entered passive-device IL", tia.totalDb, "dB"],
-      ["Equipment power budget", link.powerBudgetDb, "dB"],
-      ["Engineering margin", scenario.engineeringMarginDb, "dB"],
-      ["Usable plant budget", link.usableBudgetDb, "dB"],
-      ["Predicted receive power · Tx minimum", link.predictedRxDbm, "dBm"],
-      [link.overloadDefinitive ? "Worst-case receive power · entered minimum loss" : "Receive power at Tx max · selected loss advisory", link.predictedRxMaxDbm, "dBm"],
-      ["Overload headroom", link.overloadHeadroomDb, "dB"],
-      ["Design headroom", link.designHeadroomDb, "dB"],
-    ],
-    status:
-      link.status === "invalid"
-        ? "INVALID — resolve input errors"
-        : link.designHeadroomDb < 0
-          ? `FAIL — usable loss budget exceeded${link.isOverloaded ? link.overloadDefinitive ? "; receiver overload also fails at entered minimum path loss" : "; overload advisory also triggered at selected loss" : ""}`
-          : link.isOverloaded && link.overloadDefinitive
-        ? "FAIL — receiver overload at entered minimum path loss"
-        : link.isOverloaded
-          ? "REVIEW — overload advisory uses selected loss"
-          : link.status.toUpperCase(),
-    measurement: link.measurement
-      ? [
-          ["Measured loss", link.measurement.measuredDb, "dB"],
-          ["Measurement uncertainty", link.measurement.uncertaintyDb, "±dB"],
-          ["TIA component-adjusted test limit + entered device IL", link.tiaTestLimitDb, "dB"],
-          ["Field comparison", link.measurement.status.toUpperCase(), ""],
-        ]
-      : [],
+    outputs,
+    totals: outputs.flatMap((output) => output.totals),
+    status: overallStatus(link),
+    diagnostics: reportDiagnostics(scenario, link.diagnostics, diagnosticOutput),
     sources: Object.values(SOURCES).map((source) => [source.label, source.url]),
     disclaimer:
-      "Planning aid only. TIA-based totals combine TIA fiber/connection/splice allowances with entered splitter and custom-device insertion loss; they are not pure TIA device maxima or a certification result. Project specifications, manufacturer data, application limits, and current purchased standards govern acceptance.",
+      "Planning aid only. PON class values, coexistence loss, TIA-based totals, OTDR comparisons, and OLT/ONT telemetry must be verified against the exact equipment, project specification, application limits, and current purchased standards. OTDR and terminal telemetry are diagnostics, not a certification result.",
   };
+}
+
+function reportOutput(output) {
+  const label = output.label || output.technology || output.id;
+  const totals = [
+    [`${label} · Passive plant loss · selected design`, output.selected.totalDb, "dB"],
+    [`${label} · Upstream modeled plant loss`, output.upstreamSelected.totalDb, "dB"],
+    [`${label} · Downstream coexistence element (CEx) loss`, output.selected.coexistenceDb, "dB"],
+    [`${label} · Upstream coexistence element loss`, output.upstreamSelected.coexistenceDb, "dB"],
+    [`${label} · FOA typical estimate`, output.typical.totalDb, "dB"],
+    [`${label} · TIA component allowances + entered passive-device IL`, output.tia.totalDb, "dB"],
+    [`${label} · Equipment power budget`, output.powerBudgetDb, "dB"],
+    [`${label} · Equipment path budget after penalty`, output.equipmentPathBudgetDb, "dB"],
+    [`${label} · Available ODN budget`, output.availableBudgetDb, "dB"],
+    [`${label} · Usable ODN budget after margin`, output.usableBudgetDb, "dB"],
+    [`${label} · Predicted receive power at Tx minimum`, output.predictedRxDbm, "dBm"],
+    [`${label} · Predicted receive power at Tx maximum/loss basis`, output.predictedRxMaxDbm, "dBm"],
+    [`${label} · Raw headroom`, output.rawHeadroomDb, "dB"],
+    [`${label} · Downstream design headroom`, output.designHeadroomDb, "dB"],
+    [`${label} · Upstream class reserve`, output.upstreamDesignHeadroomDb, "dB"],
+    [`${label} · Worst directional reserve`, output.worstDesignHeadroomDb, "dB"],
+    [`${label} · Overload headroom`, output.overloadHeadroomDb, "dB"],
+  ];
+  return {
+    id: output.id,
+    label,
+    technology: output.technology,
+    standard: output.standard,
+    direction: output.direction,
+    downstreamWavelengthNm: output.wavelengthNm,
+    upstreamWavelengthNm: output.upstreamWavelengthNm,
+    attenuationDbPerKm: output.selected.attenuationDbPerKm,
+    upstreamAttenuationDbPerKm: output.upstreamSelected.attenuationDbPerKm,
+    fiberLossDb: output.selected.fiberDb,
+    upstreamFiberLossDb: output.upstreamSelected.fiberDb,
+    cexLossDb: output.selected.coexistenceDb,
+    coexistenceLossDb: output.selected.coexistenceDb,
+    upstreamCoexistenceLossDb: output.upstreamSelected.coexistenceDb,
+    selectedLossDb: output.selected.totalDb,
+    upstreamSelectedLossDb: output.upstreamSelected.totalDb,
+    typicalLossDb: output.typical.totalDb,
+    tiaLossDb: output.tia.totalDb,
+    txPowerDbm: output.txPowerDbm,
+    txMaxDbm: output.txMaxDbm,
+    rxSensitivityDbm: output.rxSensitivityDbm,
+    rxOverloadDbm: output.rxOverloadDbm,
+    opticalPenaltyDb: output.opticalPenaltyDb,
+    minimumOdnLossDb: output.minimumOdnLossDb,
+    maximumOdnLossDb: output.maximumOdnLossDb,
+    powerBudgetDb: output.powerBudgetDb,
+    equipmentPathBudgetDb: output.equipmentPathBudgetDb,
+    availableBudgetDb: output.availableBudgetDb,
+    usableBudgetDb: output.usableBudgetDb,
+    predictedRxDbm: output.predictedRxDbm,
+    predictedRxMaxDbm: output.predictedRxMaxDbm,
+    rawHeadroomDb: output.rawHeadroomDb,
+    designHeadroomDb: output.designHeadroomDb,
+    upstreamDesignHeadroomDb: output.upstreamDesignHeadroomDb,
+    worstDesignHeadroomDb: output.worstDesignHeadroomDb,
+    overloadHeadroomDb: output.overloadHeadroomDb,
+    downstreamBelowClassMinimum: output.downstreamBelowClassMinimum,
+    upstreamBelowClassMinimum: output.upstreamBelowClassMinimum,
+    downstreamAboveClassMaximum: output.downstreamAboveClassMaximum,
+    upstreamAboveClassMaximum: output.upstreamAboveClassMaximum,
+    statusCode: output.status.toUpperCase(),
+    status: outputStatus(output),
+    totals,
+  };
+}
+
+function reportDiagnostics(scenario, diagnostics, output) {
+  const otdr = diagnostics.otdr;
+  const downstream = diagnostics.downstream;
+  const upstream = diagnostics.upstream;
+  return {
+    outputId: diagnostics.outputId,
+    outputLabel: output.label,
+    otdr: {
+      title: "OTDR loss comparison",
+      rows: otdr
+        ? [
+            ["Compared optical output", output.label, ""],
+            ["Forward trace loss", nullableMetric(otdr.forwardDb), "dB"],
+            ["Reverse trace loss", nullableMetric(otdr.reverseDb), "dB"],
+            [otdr.bidirectional ? "Bidirectional average loss" : "One-way diagnostic loss", otdr.measuredDb, "dB"],
+            ["Measurement uncertainty", otdr.uncertaintyDb, "±dB"],
+            ["Uncertainty lower bound", otdr.lowerDb, "dB"],
+            ["Uncertainty upper bound", otdr.upperDb, "dB"],
+            ["Modeled selected loss", otdr.modeledLossDb, "dB"],
+            ["Measured minus modeled", otdr.deltaDb, "dB"],
+            ["OTDR diagnostic status", otdr.status.toUpperCase(), ""],
+          ]
+        : [
+            ["Compared optical output", output.label, ""],
+            ["Forward trace loss", nullableMetric(scenario.otdrForwardLossDb), "dB"],
+            ["Reverse trace loss", nullableMetric(scenario.otdrReverseLossDb), "dB"],
+            ["OTDR diagnostic status", "NOT ENTERED", ""],
+          ],
+    },
+    downstream: {
+      title: `Downstream OLT → ONT telemetry · ${output.wavelengthNm} nm`,
+      rows: telemetryRows(
+        "OLT Tx reading",
+        scenario.oltTxDbm,
+        "ONT Rx reading",
+        scenario.ontRxDbm,
+        downstream,
+      ),
+    },
+    upstream: {
+      title: `Upstream ONT → OLT telemetry · ${output.upstreamWavelengthNm} nm`,
+      rows: telemetryRows(
+        "ONT Tx reading",
+        scenario.ontTxDbm,
+        "OLT Rx reading",
+        scenario.oltRxDbm,
+        upstream,
+      ),
+    },
+  };
+}
+
+function telemetryRows(txLabel, txInput, rxLabel, rxInput, result) {
+  const rows = [
+    [txLabel, nullableMetric(txInput), "dBm"],
+    [rxLabel, nullableMetric(rxInput), "dBm"],
+  ];
+  if (!result) {
+    rows.push(["Paired telemetry comparison", "NOT ENTERED / INCOMPLETE", ""]);
+    return rows;
+  }
+  rows.push(
+    ["Derived live path loss", result.pathLossDb, "dB"],
+    ["Modeled selected loss", result.modeledLossDb, "dB"],
+    ["Live minus modeled", result.deltaDb, "dB"],
+    ["ODN class minimum", nullableMetric(result.minimumOdnLossDb), "dB"],
+    ["ODN class maximum", nullableMetric(result.maximumOdnLossDb), "dB"],
+  );
+  if (result.receiverStatus) rows.push(["Receiver-window status", result.receiverStatus.toUpperCase(), ""]);
+  rows.push(["Telemetry comparison status", result.status.toUpperCase(), ""]);
+  return rows;
+}
+
+function nullableMetric(value) {
+  return value === null || value === undefined || value === "" ? "Not entered" : value;
+}
+
+function overallStatus(link) {
+  if (link.status === "invalid") return "INVALID — resolve input errors";
+  if (link.outputs.length === 1) return outputStatus(link.outputs[0]);
+  return `${link.status.toUpperCase()} — worst result across ${link.outputs.length} optical outputs`;
+}
+
+function outputStatus(output) {
+  if (output.status === "invalid") return "INVALID — resolve input errors";
+  if (output.status === "fail") {
+    const reason = output.upstreamAboveClassMaximum
+      ? "upstream ODN class maximum exceeded"
+      : output.downstreamAboveClassMaximum
+        ? "downstream ODN class maximum exceeded"
+        : output.upstreamBelowClassMinimum
+          ? "upstream ODN loss is below the class minimum"
+          : output.downstreamBelowClassMinimum
+            ? "downstream ODN loss is below the class minimum"
+            : output.maximumOdnLossDb !== null && output.upstreamDesignHeadroomDb < output.designHeadroomDb && output.upstreamDesignHeadroomDb < 0
+              ? "upstream usable class budget exceeded"
+              : "usable loss budget exceeded";
+    const overload = output.isOverloaded
+      ? output.overloadDefinitive
+        ? "; receiver overload also fails at the defined minimum loss"
+        : "; overload advisory also triggered"
+      : "";
+    return `FAIL — ${reason}${overload}`;
+  }
+  if (output.isOverloaded && output.overloadDefinitive) {
+    return "FAIL — receiver overload at the defined minimum loss";
+  }
+  if (output.status === "review") {
+    if (output.belowClassMinimum) return "REVIEW — selected loss is below the ODN class minimum";
+    if (output.isOverloaded) return "REVIEW — overload advisory uses selected loss";
+    return "REVIEW — limited design headroom";
+  }
+  return output.status.toUpperCase();
 }
 
 export function createXlsxBytes(report) {
   const sheetRows = [
     [{ value: report.title, style: 1, mergeAcross: 7 }],
+    ["Version", report.version],
+    ["Created by", report.author],
     ["Project", report.scenarioName],
     ["Generated", report.generated],
     [],
@@ -105,13 +261,11 @@ export function createXlsxBytes(report) {
       { value: item.subtotalDb, style: 3 },
     ]),
     [],
-    [{ value: "Totals & power budget", style: 2, mergeAcross: 7 }],
-    ...report.totals.map(([label, value, unit]) => [label, { value, style: 3 }, unit]),
+    ...report.outputs.flatMap((output) => outputSheetRows(output)),
+    [{ value: "Overall result", style: 2, mergeAcross: 7 }],
     ["Result", report.status],
     [],
-    ...(report.measurement.length
-      ? [[{ value: "Field measurement", style: 2, mergeAcross: 7 }], ...report.measurement]
-      : []),
+    ...diagnosticSheetRows(report.diagnostics),
     [],
     [{ value: "References", style: 2, mergeAcross: 7 }],
     ...report.sources.map(([label, url]) => [{ value: label, style: 4 }, { value: url, style: 4, mergeAcross: 6 }]),
@@ -155,7 +309,7 @@ export function createPdfBytes(report) {
   objects[fontRegularId] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
   objects[fontBoldId] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
 
-  let pdf = "%PDF-1.4\n% Fiber Ledger\n";
+  let pdf = `%PDF-1.4\n% Fiber Ledger v${report.version} - Created by ${report.author}\n`;
   const offsets = [0];
   for (let id = 1; id < objects.length; id += 1) {
     offsets[id] = encoder.encode(pdf).length;
@@ -192,6 +346,53 @@ function row(category, label, quantity, unit, lossEachDb, subtotalDb) {
     subtotalDb,
     equation: `${format(quantity, 6)} × ${format(lossEachDb, 4)} dB = ${format(subtotalDb, 4)} dB`,
   };
+}
+
+function outputSheetRows(output) {
+  return [
+    [{ value: `Optical output · ${output.label}`, style: 2, mergeAcross: 7 }],
+    ["Technology", output.technology],
+    ["Standard / class", output.standard],
+    ["Direction", output.direction],
+    ["Downstream wavelength", numericCell(output.downstreamWavelengthNm), "nm"],
+    ["Upstream wavelength", numericCell(output.upstreamWavelengthNm), "nm"],
+    ["Downstream fiber attenuation", numericCell(output.attenuationDbPerKm), "dB/km"],
+    ["Downstream fiber loss", numericCell(output.fiberLossDb), "dB"],
+    ["Downstream coexistence element (CEx) loss", numericCell(output.coexistenceLossDb), "dB"],
+    ["Upstream fiber attenuation", numericCell(output.upstreamAttenuationDbPerKm), "dB/km"],
+    ["Upstream fiber loss", numericCell(output.upstreamFiberLossDb), "dB"],
+    ["Upstream coexistence element (CEx) loss", numericCell(output.upstreamCoexistenceLossDb), "dB"],
+    ["ODN class minimum", metricCell(output.minimumOdnLossDb), "dB"],
+    ["ODN class maximum", metricCell(output.maximumOdnLossDb), "dB"],
+    ["Tx minimum", numericCell(output.txPowerDbm), "dBm"],
+    ["Tx maximum", numericCell(output.txMaxDbm), "dBm"],
+    ["Rx sensitivity", numericCell(output.rxSensitivityDbm), "dBm"],
+    ["Rx overload", numericCell(output.rxOverloadDbm), "dBm"],
+    ["Optical path penalty", numericCell(output.opticalPenaltyDb), "dB"],
+    ...output.totals.map(([label, value, unit]) => [label, numericCell(value), unit]),
+    ["Output result", output.status],
+    [],
+  ];
+}
+
+function diagnosticSheetRows(diagnostics) {
+  const sections = [diagnostics.otdr, diagnostics.downstream, diagnostics.upstream];
+  return [
+    [{ value: `Diagnostics · ${diagnostics.outputLabel}`, style: 2, mergeAcross: 7 }],
+    ...sections.flatMap((section) => [
+      [{ value: section.title, style: 2, mergeAcross: 7 }],
+      ...section.rows.map(([label, value, unit]) => [label, metricCell(value), unit]),
+      [],
+    ]),
+  ];
+}
+
+function numericCell(value) {
+  return { value, style: 3 };
+}
+
+function metricCell(value) {
+  return typeof value === "number" ? numericCell(value) : value;
 }
 
 function worksheetXml(rows) {
@@ -297,12 +498,12 @@ function stylesXml() {
 function corePropertiesXml(report) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>${escapeXml(report.scenarioName)}</dc:title><dc:creator>Fiber Ledger</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${escapeXml(report.generated)}</dcterms:created>
+  <dc:title>${escapeXml(`${report.scenarioName} · Fiber Ledger v${report.version}`)}</dc:title><dc:creator>${escapeXml(report.author)}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${escapeXml(report.generated)}</dcterms:created>
 </cp:coreProperties>`;
 }
 
 function appPropertiesXml() {
-  return `<?xml version="1.0" encoding="UTF-8"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Fiber Ledger</Application></Properties>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Fiber Ledger v${APP_VERSION}</Application></Properties>`;
 }
 
 function zipStore(files) {
@@ -377,6 +578,7 @@ function reportLines(report) {
   const lines = [
     { text: report.title, bold: true, size: 15 },
     { text: report.scenarioName, bold: true, size: 11 },
+    { text: `Version ${report.version} | Created by ${report.author}`, size: 8 },
     { text: `Generated ${report.generated}`, size: 8 },
     { text: "" },
     { text: "INPUTS", bold: true },
@@ -384,13 +586,10 @@ function reportLines(report) {
     { text: "" },
     { text: "LOSS LEDGER", bold: true },
     ...report.rows.map((item) => ({ text: `${item.category} | ${item.label} | ${item.equation}` })),
+    ...report.outputs.flatMap((output) => outputReportLines(output)),
     { text: "" },
-    { text: "TOTALS & POWER BUDGET", bold: true },
-    ...report.totals.map(([label, value, unit]) => ({ text: `${label}: ${format(value, 3)} ${unit}` })),
     { text: `RESULT: ${report.status}`, bold: true },
-    ...(report.measurement.length
-      ? [{ text: "" }, { text: "FIELD MEASUREMENT", bold: true }, ...report.measurement.map(([label, value, unit]) => ({ text: `${label}: ${typeof value === "number" ? format(value, 3) : value} ${unit}` }))]
-      : []),
+    ...diagnosticReportLines(report.diagnostics),
     { text: "" },
     { text: "REFERENCES", bold: true },
     ...report.sources.map(([label, url]) => ({ text: `${label}: ${url}`, size: 7 })),
@@ -398,6 +597,52 @@ function reportLines(report) {
     { text: report.disclaimer, size: 7 },
   ];
   return lines.flatMap((line) => wrapLine(line, line.size <= 7 ? 112 : 96));
+}
+
+function outputReportLines(output) {
+  const metrics = [
+    ["Technology", output.technology, ""],
+    ["Standard / class", output.standard, ""],
+    ["Direction", output.direction, ""],
+    ["Downstream wavelength", output.downstreamWavelengthNm, "nm"],
+    ["Upstream wavelength", output.upstreamWavelengthNm, "nm"],
+    ["Downstream fiber attenuation", output.attenuationDbPerKm, "dB/km"],
+    ["Downstream fiber loss", output.fiberLossDb, "dB"],
+    ["Downstream coexistence element (CEx) loss", output.coexistenceLossDb, "dB"],
+    ["Upstream fiber attenuation", output.upstreamAttenuationDbPerKm, "dB/km"],
+    ["Upstream fiber loss", output.upstreamFiberLossDb, "dB"],
+    ["Upstream coexistence element (CEx) loss", output.upstreamCoexistenceLossDb, "dB"],
+    ["ODN class minimum", nullableMetric(output.minimumOdnLossDb), "dB"],
+    ["ODN class maximum", nullableMetric(output.maximumOdnLossDb), "dB"],
+    ["Tx minimum", output.txPowerDbm, "dBm"],
+    ["Tx maximum", output.txMaxDbm, "dBm"],
+    ["Rx sensitivity", output.rxSensitivityDbm, "dBm"],
+    ["Rx overload", output.rxOverloadDbm, "dBm"],
+    ["Optical path penalty", output.opticalPenaltyDb, "dB"],
+    ...output.totals,
+    ["Output result", output.status, ""],
+  ];
+  return [
+    { text: "" },
+    { text: `OPTICAL OUTPUT · ${output.label}`, bold: true },
+    ...metrics.map(metricLine),
+  ];
+}
+
+function diagnosticReportLines(diagnostics) {
+  return [
+    { text: "" },
+    { text: `DIAGNOSTICS · ${diagnostics.outputLabel}`, bold: true },
+    ...[diagnostics.otdr, diagnostics.downstream, diagnostics.upstream].flatMap((section) => [
+      { text: section.title, bold: true },
+      ...section.rows.map(metricLine),
+    ]),
+  ];
+}
+
+function metricLine([label, value, unit]) {
+  const rendered = typeof value === "number" ? format(value, 3) : value;
+  return { text: `${label}: ${rendered}${unit ? ` ${unit}` : ""}` };
 }
 
 function pdfContentStream(lines, pageNumber, pageCount) {
@@ -432,6 +677,11 @@ function asciiText(value) {
     .replaceAll("×", "x")
     .replaceAll("·", " - ")
     .replaceAll("±", "+/-")
+    .replaceAll("→", "->")
+    .replaceAll("←", "<-")
+    .replaceAll("↑", "up")
+    .replaceAll("↓", "down")
+    .replaceAll("−", "-")
     .replace(/[–—]/g, "-")
     .replace(/[^ -~]/g, "?");
 }

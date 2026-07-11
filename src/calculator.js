@@ -4,7 +4,7 @@ import {
   FIBER_TYPES,
   SPLITTERS,
   STANDARD_PROFILES,
-} from "./config.js";
+} from "./config.js?v=1.1";
 
 export const FEET_PER_KILOMETER = 3280.83989501312;
 

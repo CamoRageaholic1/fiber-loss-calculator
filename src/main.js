@@ -6,7 +6,7 @@ import {
   SOURCES,
   SPLITTERS,
   STANDARD_PROFILES,
-} from "./config.js";
+} from "./config.js?v=1.1";
 import {
   applyProfileDefaults,
   calculateLink,
@@ -14,14 +14,14 @@ import {
   fromKilometers,
   syncFiberDefaults,
   toKilometers,
-} from "./calculator.js";
+} from "./calculator.js?v=1.1";
 import {
   buildReport,
   createPdfBytes,
   createXlsxBytes,
   downloadBytes,
-} from "./exporters.js";
-import { formatNumber } from "./format.js";
+} from "./exporters.js?v=1.1";
+import { formatNumber } from "./format.js?v=1.1";
 
 const STORAGE_KEY = "fiber-ledger-scenario-v1";
 const app = document.querySelector("#app");

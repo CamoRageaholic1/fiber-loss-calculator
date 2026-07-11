@@ -1,6 +1,6 @@
-import { APP_VERSION, FIBER_TYPES, SOURCES, STANDARD_PROFILES } from "./config.js";
-import { fromKilometers } from "./calculator.js";
-import { formatNumber } from "./format.js";
+import { APP_VERSION, FIBER_TYPES, SOURCES, STANDARD_PROFILES } from "./config.js?v=1.1";
+import { fromKilometers } from "./calculator.js?v=1.1";
+import { formatNumber } from "./format.js?v=1.1";
 
 const encoder = new TextEncoder();
 
